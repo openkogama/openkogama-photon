@@ -31,7 +31,7 @@ public sealed class PhotonServer : IDisposable
 
     public ICollection<PhotonPeer> Peers => _peers.Values;
 
-    internal int Now => (int)_clock.ElapsedMilliseconds;
+    public int Now =>(int)_clock.ElapsedMilliseconds;
 
     public async Task RunAsync(CancellationToken token = default)
     {
@@ -116,6 +116,9 @@ public sealed class PhotonServer : IDisposable
 
         foreach (EnetCommand command in packet.Commands)
         {
+            if (peer is null || !peer.Connected)
+                Log?.Invoke($"{from}: handshake {command.Type} ch{command.Channel} seq {command.SequenceNumber} challenge {packet.Challenge} time {packet.SentTime}");
+
             if (command.Type == CommandType.Connect)
             {
                 peer ??= Add(from, packet.Challenge);
