@@ -62,6 +62,12 @@ public sealed class EventData
     public T? Get<T>(byte key) => Parameters.TryGetValue(key, out object? value) && value is T typed ? typed : default;
 }
 
+public interface IMessageTranslator
+{
+    OperationResponse? Outgoing(OperationResponse response);
+    EventData? Outgoing(EventData data);
+}
+
 public enum DisconnectReason
 {
     ClientLeft,

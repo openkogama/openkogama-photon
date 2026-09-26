@@ -9,7 +9,7 @@ namespace OpenKogama.Photon;
 public sealed class PhotonServer : IDisposable
 {
     const int TickIntervalMs = 50;
-    const int TimeoutMs = 15000;
+    const int TimeoutMs = 30000;
 
     readonly UdpClient _socket;
     readonly ConcurrentDictionary<IPEndPoint, PhotonPeer> _peers = [];

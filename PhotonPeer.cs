@@ -5,7 +5,9 @@ namespace OpenKogama.Photon;
 public sealed class PhotonPeer
 {
     const int ResendAfterMs = 400;
-    const int MaxSendTries = 30;
+    const int MaxResendIntervalMs = 3000;
+    const int GiveUpAfterMs = 30000;
+    const int ReliableWindow = 128;
     const int MaxMessageSize = 16 * 1024 * 1024;
     const int MaxFragmentGroups = 4;
 
@@ -21,8 +23,9 @@ public sealed class PhotonPeer
     sealed class Unacked(byte[] bytes, int time)
     {
         public readonly byte[] Bytes = bytes;
+        public readonly int FirstSent = time;
         public int Time = time;
-        public int Tries = 1;
+        public int Interval = ResendAfterMs;
     }
 
     readonly PhotonServer _server;
@@ -31,6 +34,7 @@ public sealed class PhotonPeer
     readonly Dictionary<int, byte[]> _fragments = [];
     readonly Dictionary<int, int> _fragmentsLeft = [];
     readonly List<byte[]> _outgoing = [];
+    readonly Queue<(long Key, byte[] Command)> _waiting = [];
     readonly object _sync = new();
 
     internal PhotonPeer(PhotonServer server, IPEndPoint endPoint, short id, int challenge)
@@ -50,11 +54,21 @@ public sealed class PhotonPeer
     internal int LastSeen;
     internal byte[]? VerifyCommand;
 
-    public void Send(OperationResponse response, byte channel = 0) =>
-        SendMessage(EnetProtocol.MsgOperationResponse, Protocol16.WriteOperationResponse(response), channel, true);
+    public IMessageTranslator? Translator { get; set; }
 
-    public void Send(EventData data, byte channel = 0, bool reliable = true) =>
-        SendMessage(EnetProtocol.MsgEvent, Protocol16.WriteEventData(data), channel, reliable);
+    public void Send(OperationResponse response, byte channel = 0)
+    {
+        OperationResponse? outgoing = Translator is null ? response : Translator.Outgoing(response);
+        if (outgoing is not null)
+            SendMessage(EnetProtocol.MsgOperationResponse, Protocol16.WriteOperationResponse(outgoing), channel, true);
+    }
+
+    public void Send(EventData data, byte channel = 0, bool reliable = true)
+    {
+        EventData? outgoing = Translator is null ? data : Translator.Outgoing(data);
+        if (outgoing is not null)
+            SendMessage(EnetProtocol.MsgEvent, Protocol16.WriteEventData(outgoing), channel, reliable);
+    }
 
     public void Disconnect()
     {
@@ -148,7 +162,16 @@ public sealed class PhotonPeer
 
     internal void OnAcknowledge(byte channel, int sequenceNumber)
     {
-        lock (_sync) _unacked.Remove(Key(channel, sequenceNumber));
+        lock (_sync)
+        {
+            _unacked.Remove(Key(channel, sequenceNumber));
+            while (_waiting.Count > 0 && _unacked.Count < ReliableWindow)
+            {
+                var (key, command) = _waiting.Dequeue();
+                _unacked[key] = new Unacked(command, _server.Now);
+                _outgoing.Add(command);
+            }
+        }
     }
 
     internal List<byte[]> Receive(EnetCommand command)
@@ -225,15 +248,16 @@ public sealed class PhotonPeer
         {
             foreach (Unacked sent in _unacked.Values)
             {
-                if (now - sent.Time < ResendAfterMs) continue;
+                if (now - sent.Time < sent.Interval) continue;
 
-                if (++sent.Tries > MaxSendTries)
+                if (now - sent.FirstSent > GiveUpAfterMs)
                 {
                     giveUp = true;
                     break;
                 }
 
                 sent.Time = now;
+                sent.Interval = Math.Min(sent.Interval * 2, MaxResendIntervalMs);
                 _outgoing.Add(sent.Bytes);
             }
 
@@ -278,8 +302,21 @@ public sealed class PhotonPeer
 
     void Queue(byte[] command, byte channel, int sequenceNumber, bool reliable)
     {
+        if (!reliable)
+        {
+            _outgoing.Add(command);
+            return;
+        }
+
+        long key = Key(channel, sequenceNumber);
+        if (_waiting.Count > 0 || _unacked.Count >= ReliableWindow)
+        {
+            _waiting.Enqueue((key, command));
+            return;
+        }
+
         _outgoing.Add(command);
-        if (reliable) _unacked[Key(channel, sequenceNumber)] = new Unacked(command, _server.Now);
+        _unacked[key] = new Unacked(command, _server.Now);
     }
 
     Channel GetChannel(byte channel)
