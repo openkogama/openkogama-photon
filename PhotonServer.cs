@@ -157,13 +157,15 @@ public sealed class PhotonServer : IDisposable
 
     void Message(PhotonPeer peer, byte[] payload)
     {
-        if (payload.Length < 2 || payload[0] != EnetProtocol.PhotonMagic) return;
+        bool protocol15 = payload.Length >= EnetProtocol.Header15Size && payload[0] == EnetProtocol.PhotonMagic15;
+        if (!protocol15 && (payload.Length < 2 || payload[0] != EnetProtocol.PhotonMagic)) return;
 
-        byte messageType = (byte)(payload[1] & 0x7F);
+        byte messageType = (byte)(payload[protocol15 ? 5 : 1] & 0x7F);
 
         switch (messageType)
         {
             case EnetProtocol.MsgInitRequest:
+                if (!peer.Connected) peer.Protocol = protocol15 ? PhotonProtocol.Protocol15 : PhotonProtocol.Protocol16;
                 peer.SendInitResponse();
                 if (peer.Connected) break;
                 peer.Connected = true;
@@ -171,7 +173,7 @@ public sealed class PhotonServer : IDisposable
                 break;
 
             case EnetProtocol.MsgOperationRequest:
-                Operation?.Invoke(peer, Protocol16.ReadOperationRequest(payload, 2));
+                Operation?.Invoke(peer, protocol15 ? Protocol15.ReadOperationRequest(payload) : Protocol16.ReadOperationRequest(payload, 2));
                 break;
 
             default:

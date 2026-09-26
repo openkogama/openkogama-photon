@@ -55,18 +55,27 @@ public sealed class PhotonPeer
     internal byte[]? VerifyCommand;
 
     public IMessageTranslator? Translator { get; set; }
+    public PhotonProtocol Protocol { get; internal set; }
 
     public void Send(OperationResponse response, byte channel = 0)
     {
         OperationResponse? outgoing = Translator is null ? response : Translator.Outgoing(response);
-        if (outgoing is not null)
+        if (outgoing is null) return;
+
+        if (Protocol == PhotonProtocol.Protocol15)
+            SendPayload(Protocol15.WriteOperationResponse(outgoing), channel, true);
+        else
             SendMessage(EnetProtocol.MsgOperationResponse, Protocol16.WriteOperationResponse(outgoing), channel, true);
     }
 
     public void Send(EventData data, byte channel = 0, bool reliable = true)
     {
         EventData? outgoing = Translator is null ? data : Translator.Outgoing(data);
-        if (outgoing is not null)
+        if (outgoing is null) return;
+
+        if (Protocol == PhotonProtocol.Protocol15)
+            SendPayload(Protocol15.WriteEventData(outgoing), channel, reliable);
+        else
             SendMessage(EnetProtocol.MsgEvent, Protocol16.WriteEventData(outgoing), channel, reliable);
     }
 
@@ -88,7 +97,11 @@ public sealed class PhotonPeer
         payload[0] = EnetProtocol.PhotonMagic;
         payload[1] = messageType;
         Buffer.BlockCopy(body, 0, payload, 2, body.Length);
+        SendPayload(payload, channel, reliable);
+    }
 
+    void SendPayload(byte[] payload, byte channel, bool reliable)
+    {
         lock (_sync)
         {
             Channel state = GetChannel(channel);
@@ -157,7 +170,10 @@ public sealed class PhotonPeer
 
     internal void SendInitResponse()
     {
-        SendMessage(EnetProtocol.MsgInitResponse, [], 0, true);
+        if (Protocol == PhotonProtocol.Protocol15)
+            SendPayload(Protocol15.WriteInitResponse(), 0, true);
+        else
+            SendMessage(EnetProtocol.MsgInitResponse, [], 0, true);
     }
 
     internal void OnAcknowledge(byte channel, int sequenceNumber)

@@ -15,6 +15,21 @@ public static class Protocol16
         };
     }
 
+    internal static OperationRequest ReadOperationRequest15(byte[] data, int offset)
+    {
+        var reader = new Reader(data, offset);
+        byte code = reader.ReadByte();
+        reader.ReadByte();
+        return new OperationRequest { OperationCode = code, Parameters = reader.ReadParameterTable() };
+    }
+
+    internal static byte[] WriteParameterTable15(Dictionary<byte, object?> parameters)
+    {
+        var writer = new Writer(protocol15: true);
+        writer.WriteParameterTable(parameters);
+        return writer.ToArray();
+    }
+
     public static EventData ReadEventData(byte[] data, int offset)
     {
         var reader = new Reader(data, offset);
@@ -268,9 +283,10 @@ public static class Protocol16
         }
     }
 
-    sealed class Writer
+    sealed class Writer(bool protocol15 = false)
     {
         readonly List<byte> _bytes = [];
+        readonly bool _protocol15 = protocol15;
 
         public byte[] ToArray() => [.. _bytes];
 
@@ -304,13 +320,40 @@ public static class Protocol16
 
         public void WriteParameterTable(Dictionary<byte, object?> parameters)
         {
-            WriteShortRaw((short)parameters.Count);
-            foreach ((byte key, object? value) in parameters)
+            var written = _protocol15 ? parameters.Where(pair => pair.Value is not null).ToList() : [.. parameters];
+            WriteShortRaw((short)written.Count);
+            foreach ((byte key, object? value) in written)
             {
                 WriteByte(key);
                 WriteValue(value);
             }
         }
+
+        void WriteHashtable(IEnumerable<KeyValuePair<object, object?>> entries)
+        {
+            var written = _protocol15 ? entries.Where(pair => pair.Value is not null).ToList() : [.. entries];
+            WriteByte((byte)GpType.Hashtable);
+            WriteShortRaw((short)written.Count);
+            foreach ((object key, object? item) in written)
+            {
+                WriteValue(key);
+                WriteValue(item);
+            }
+        }
+
+        void WriteVector(object?[] items)
+        {
+            WriteByte((byte)Vector);
+            WriteShortRaw((short)items.Length);
+            for (int i = 0; i < items.Length; i++)
+            {
+                if (items[i] is null || items[i]!.GetType() != items[0]!.GetType())
+                    throw new NotSupportedException("protocol15: vectors need items of one type");
+                if (i == 0) WriteValue(items[i]); else WriteRaw(items[i]);
+            }
+        }
+
+        const byte Vector = 118;
 
         void WriteDictionaryBody(PhotonDictionary dictionary)
         {
@@ -350,6 +393,8 @@ public static class Protocol16
         {
             switch (value)
             {
+                case null when _protocol15:
+                    throw new NotSupportedException("protocol15: null cannot be written");
                 case null:
                     WriteByte((byte)GpType.Null);
                     break;
@@ -408,6 +453,18 @@ public static class Protocol16
                     WriteByte((byte)GpType.Short);
                     foreach (short number in numbers) WriteShortRaw(number);
                     break;
+                case bool[] flags:
+                    WriteByte((byte)GpType.Array);
+                    WriteShortRaw((short)flags.Length);
+                    WriteByte((byte)GpType.Boolean);
+                    foreach (bool flag in flags) WriteByte(flag ? (byte)1 : (byte)0);
+                    break;
+                case long[] numbers:
+                    WriteByte((byte)GpType.Array);
+                    WriteShortRaw((short)numbers.Length);
+                    WriteByte((byte)GpType.Long);
+                    foreach (long number in numbers) WriteLongRaw(number);
+                    break;
                 case byte[][] blobs:
                     WriteByte((byte)GpType.Array);
                     WriteShortRaw((short)blobs.Length);
@@ -423,19 +480,19 @@ public static class Protocol16
                     WriteShortRaw((short)texts.Length);
                     foreach (string text in texts) WriteStringRaw(text);
                     break;
+                case object?[] items when _protocol15:
+                    WriteVector(items);
+                    break;
                 case object?[] items:
                     WriteByte((byte)GpType.ObjectArray);
                     WriteShortRaw((short)items.Length);
                     foreach (object? item in items) WriteValue(item);
                     break;
                 case Dictionary<object, object?> table:
-                    WriteByte((byte)GpType.Hashtable);
-                    WriteShortRaw((short)table.Count);
-                    foreach ((object key, object? item) in table)
-                    {
-                        WriteValue(key);
-                        WriteValue(item);
-                    }
+                    WriteHashtable(table);
+                    break;
+                case PhotonDictionary dictionary when _protocol15:
+                    WriteHashtable(dictionary.Entries);
                     break;
                 case PhotonDictionary dictionary:
                     WriteByte((byte)GpType.Dictionary);

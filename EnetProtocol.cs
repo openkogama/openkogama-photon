@@ -31,6 +31,8 @@ public static class EnetProtocol
     public const int MaxPayloadSize = Mtu - 12 - 36;
 
     public const byte PhotonMagic = 0xF3;
+    public const byte PhotonMagic15 = 0xF1;
+    public const int Header15Size = 6;
     public const byte MsgInitRequest = 0;
     public const byte MsgInitResponse = 1;
     public const byte MsgOperationRequest = 2;
@@ -38,6 +40,12 @@ public static class EnetProtocol
     public const byte MsgEvent = 4;
     public const byte MsgInternalOperationRequest = 6;
     public const byte MsgInternalOperationResponse = 7;
+}
+
+public enum PhotonProtocol
+{
+    Protocol16,
+    Protocol15,
 }
 
 public enum CommandType : byte
