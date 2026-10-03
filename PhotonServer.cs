@@ -2,7 +2,9 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Net.WebSockets;
 using System.Runtime.InteropServices;
+using System.Threading.Channels;
 
 namespace OpenKogama.Photon;
 
@@ -11,7 +13,7 @@ public sealed class PhotonServer : IDisposable
     const int TickIntervalMs = 50;
     const int TimeoutMs = 30000;
 
-    readonly UdpClient _socket;
+    readonly UdpClient? _socket;
     readonly ConcurrentDictionary<IPEndPoint, PhotonPeer> _peers = [];
     readonly Stopwatch _clock = Stopwatch.StartNew();
     int _nextPeerId;
@@ -20,6 +22,10 @@ public sealed class PhotonServer : IDisposable
     public Action<PhotonPeer, DisconnectReason>? Disconnected;
     public Action<PhotonPeer, OperationRequest>? Operation;
     public Action<string>? Log;
+
+    public PhotonServer()
+    {
+    }
 
     public PhotonServer(int port)
     {
@@ -35,6 +41,7 @@ public sealed class PhotonServer : IDisposable
 
     public async Task RunAsync(CancellationToken token = default)
     {
+        if (_socket is null) throw new InvalidOperationException("no udp socket");
         Task ticks = TickAsync(token);
 
         while (!token.IsCancellationRequested)
@@ -72,7 +79,7 @@ public sealed class PhotonServer : IDisposable
         await ticks;
     }
 
-    async Task TickAsync(CancellationToken token)
+    public async Task TickAsync(CancellationToken token = default)
     {
         try
         {
@@ -182,6 +189,164 @@ public sealed class PhotonServer : IDisposable
         }
     }
 
+    const string WebSocketProtocol = "GpBinaryV16";
+    const byte PingCode = 1;
+    const byte PingClientTime = 1;
+    const byte PingServerTime = 2;
+
+    public async Task RunWebSocketsAsync(string prefix, CancellationToken token = default)
+    {
+        var listener = new HttpListener();
+        listener.Prefixes.Add(prefix);
+        listener.Start();
+        token.Register(listener.Stop);
+
+        while (!token.IsCancellationRequested)
+        {
+            HttpListenerContext context;
+            try
+            {
+                context = await listener.GetContextAsync();
+            }
+            catch (Exception error) when (error is HttpListenerException or ObjectDisposedException)
+            {
+                break;
+            }
+
+            if (!context.Request.IsWebSocketRequest)
+            {
+                context.Response.StatusCode = 400;
+                context.Response.Close();
+                continue;
+            }
+
+            _ = ServeWebSocketAsync(context, token);
+        }
+    }
+
+    async Task ServeWebSocketAsync(HttpListenerContext context, CancellationToken token)
+    {
+        string? protocol = context.Request.Headers["Sec-WebSocket-Protocol"]?.Split(',').Select(p => p.Trim())
+            .FirstOrDefault(p => p == WebSocketProtocol);
+        HttpListenerWebSocketContext socketContext;
+        try
+        {
+            socketContext = await context.AcceptWebSocketAsync(protocol);
+        }
+        catch (Exception error)
+        {
+            Log?.Invoke($"{context.Request.RemoteEndPoint}: websocket upgrade failed, {error.Message}");
+            return;
+        }
+
+        WebSocket socket = socketContext.WebSocket;
+        Channel<byte[]> queue = Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
+        PhotonPeer peer = Accept(context.Request.RemoteEndPoint, data => queue.Writer.TryWrite(data), () =>
+        {
+            queue.Writer.TryComplete();
+            _ = socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None);
+        });
+        Task pump = PumpAsync(socket, queue.Reader, token);
+
+        var buffer = new byte[64 * 1024];
+        var message = new MemoryStream();
+        try
+        {
+            while (socket.State == WebSocketState.Open && !token.IsCancellationRequested)
+            {
+                WebSocketReceiveResult result = await socket.ReceiveAsync(buffer, token);
+                if (result.MessageType == WebSocketMessageType.Close) break;
+                message.Write(buffer, 0, result.Count);
+                if (!result.EndOfMessage) continue;
+
+                byte[] payload = message.ToArray();
+                message.SetLength(0);
+                Receive(peer, payload);
+            }
+        }
+        catch (Exception error) when (error is WebSocketException or OperationCanceledException)
+        {
+        }
+
+        Remove(peer, DisconnectReason.ClientLeft);
+        socket.Dispose();
+        await pump;
+    }
+
+    static async Task PumpAsync(WebSocket socket, ChannelReader<byte[]> queue, CancellationToken token)
+    {
+        try
+        {
+            await foreach (byte[] message in queue.ReadAllAsync(token))
+                await socket.SendAsync(message, WebSocketMessageType.Binary, true, token);
+        }
+        catch (Exception error) when (error is WebSocketException or OperationCanceledException or ObjectDisposedException)
+        {
+        }
+    }
+
+    public PhotonPeer Accept(IPEndPoint from, Action<byte[]> send, Action? close = null)
+    {
+        PhotonPeer peer = Add(from, 0);
+        peer.Sender = send;
+        peer.Closer = close;
+        peer.Protocol = PhotonProtocol.Protocol16;
+        peer.LastSeen = Now;
+        peer.Connected = true;
+        peer.SendInitResponse();
+        Connected?.Invoke(peer);
+        return peer;
+    }
+
+    public void Receive(PhotonPeer peer, byte[] payload)
+    {
+        peer.LastSeen = Now;
+        try
+        {
+            WebSocketMessage(peer, payload);
+        }
+        catch (Exception error)
+        {
+            Log?.Invoke($"{peer}: {error}");
+        }
+    }
+
+    public void Close(PhotonPeer peer) => Remove(peer, DisconnectReason.ClientLeft);
+
+    void WebSocketMessage(PhotonPeer peer, byte[] payload)
+    {
+        if (payload.Length < 2 || payload[0] != EnetProtocol.PhotonMagic)
+        {
+            Log?.Invoke($"{peer}: websocket message without photon magic, {Convert.ToHexString(payload, 0, Math.Min(payload.Length, 16))}");
+            return;
+        }
+        byte messageType = (byte)(payload[1] & 0x7F);
+
+        switch (messageType)
+        {
+            case EnetProtocol.MsgInitRequest:
+                peer.SendInitResponse();
+                break;
+
+            case EnetProtocol.MsgOperationRequest:
+                Operation?.Invoke(peer, Protocol16.ReadOperationRequest(payload, 2));
+                break;
+
+            case EnetProtocol.MsgInternalOperationRequest:
+                OperationRequest ping = Protocol16.ReadOperationRequest(payload, 2);
+                if (ping.OperationCode != PingCode) break;
+                var pong = new OperationResponse(ping);
+                pong.Parameters[PingClientTime] = ping[PingClientTime];
+                pong.Parameters[PingServerTime] = Now;
+                peer.SendMessage(EnetProtocol.MsgInternalOperationResponse, Protocol16.WriteOperationResponse(pong), 0, true);
+                break;
+
+            default:
+                Log?.Invoke($"{peer}: unhandled websocket message type {messageType}");
+                break;
+        }
+    }
+
     PhotonPeer Add(IPEndPoint from, int challenge)
     {
         var peer = new PhotonPeer(this, from, (short)Interlocked.Increment(ref _nextPeerId), challenge);
@@ -203,7 +368,7 @@ public sealed class PhotonServer : IDisposable
     {
         try
         {
-            _socket.Send(data, data.Length, to);
+            _socket?.Send(data, data.Length, to);
         }
         catch (SocketException error)
         {
@@ -211,5 +376,5 @@ public sealed class PhotonServer : IDisposable
         }
     }
 
-    public void Dispose() => _socket.Dispose();
+    public void Dispose() => _socket?.Dispose();
 }

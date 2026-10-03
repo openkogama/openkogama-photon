@@ -52,6 +52,10 @@ public sealed class PhotonPeer
     public bool Connected { get; internal set; }
 
     internal int LastSeen;
+    internal Action<byte[]>? Sender;
+    internal Action? Closer;
+
+    public bool IsWebSocket => Sender is not null;
     internal byte[]? VerifyCommand;
 
     public IMessageTranslator? Translator { get; set; }
@@ -81,6 +85,13 @@ public sealed class PhotonPeer
 
     public void Disconnect()
     {
+        if (Sender is not null)
+        {
+            Closer?.Invoke();
+            _server.Remove(this, DisconnectReason.ServerClosed);
+            return;
+        }
+
         lock (_sync)
         {
             int sequence = NextReliable(EnetProtocol.ControlChannel);
@@ -102,6 +113,12 @@ public sealed class PhotonPeer
 
     void SendPayload(byte[] payload, byte channel, bool reliable)
     {
+        if (Sender is not null)
+        {
+            Sender(payload);
+            return;
+        }
+
         lock (_sync)
         {
             Channel state = GetChannel(channel);
@@ -258,6 +275,7 @@ public sealed class PhotonPeer
 
     internal void Tick(int now)
     {
+        if (Sender is not null) return;
         bool giveUp = false;
 
         lock (_sync)
