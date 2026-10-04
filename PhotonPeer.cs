@@ -56,6 +56,7 @@ public sealed class PhotonPeer
     internal Action? Closer;
 
     public bool IsWebSocket => Sender is not null;
+    public int ServerTime => _server.Now;
     internal byte[]? VerifyCommand;
 
     public IMessageTranslator? Translator { get; set; }
