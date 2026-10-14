@@ -349,7 +349,7 @@ public sealed class PhotonServer : IDisposable
 
     PhotonPeer Add(IPEndPoint from, int challenge)
     {
-        var peer = new PhotonPeer(this, from, (short)Interlocked.Increment(ref _nextPeerId), challenge);
+        var peer = new PhotonPeer(this, from, (short)Interlocked.Increment(ref _nextPeerId), challenge) { LastSeen = Now };
         _peers[from] = peer;
         Log?.Invoke($"{peer}: connect");
         return peer;
