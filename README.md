@@ -1,4 +1,7 @@
-# openkogama-photon
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/openkogama/openkogama-site/main/.github/logo/photon-dark.png">
+  <img src="https://raw.githubusercontent.com/openkogama/openkogama-site/main/.github/logo/photon-light.png" alt="OpenKogama Photon" width="400">
+</picture>
 
 Photon UDP transport for KoGaMa clients. Takes datagrams, gives operations and events.
 
