@@ -55,7 +55,8 @@ public sealed class PhotonPeer
     internal Action<byte[]>? Sender;
     internal Action? Closer;
 
-    public bool IsWebSocket => Sender is not null;
+    public PhotonTransport Transport { get; internal set; }
+    public bool IsWebSocket => Transport == PhotonTransport.WebSocket;
     public int ServerTime => _server.Now;
     internal byte[]? VerifyCommand;
 
